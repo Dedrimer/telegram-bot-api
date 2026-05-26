@@ -393,6 +393,7 @@ bool Client::init_methods() {
   methods_.emplace("deletewebhook", &Client::process_set_webhook_query);
   methods_.emplace("getwebhookinfo", &Client::process_get_webhook_info_query);
   methods_.emplace("getfile", &Client::process_get_file_query);
+  methods_.emplace("cancelfiledownload", &Client::process_cancel_file_download_query);
   return true;
 }
 
@@ -6918,6 +6919,30 @@ class Client::TdOnCancelDownloadFileCallback final : public TdQueryCallback {
     }
     CHECK(result->get_id() == td_api::ok::ID);
   }
+};
+
+class Client::TdOnCancelFileDownloadCallback final : public TdQueryCallback {
+ public:
+  TdOnCancelFileDownloadCallback(Client *client, int32 file_id, PromisedQueryPtr query)
+      : client_(client), file_id_(file_id), query_(std::move(query)) {
+  }
+
+  void on_result(object_ptr<td_api::Object> result) final {
+    if (result->get_id() == td_api::error::ID) {
+      return fail_query_with_error(std::move(query_), move_object_as<td_api::error>(result));
+    }
+    CHECK(result->get_id() == td_api::ok::ID);
+
+    if (client_->is_file_being_downloaded(file_id_)) {
+      client_->on_file_download(file_id_, td::Status::Error(400, "Bad Request: file download was cancelled"));
+    }
+    answer_query(td::JsonTrue(), std::move(query_));
+  }
+
+ private:
+  Client *client_;
+  int32 file_id_;
+  PromisedQueryPtr query_;
 };
 
 class Client::TdOnGetReplyMessageCallback final : public TdQueryCallback {
@@ -15811,6 +15836,14 @@ td::Status Client::process_get_file_query(PromisedQueryPtr &query) {
   return td::Status::OK();
 }
 
+td::Status Client::process_cancel_file_download_query(PromisedQueryPtr &query) {
+  td::string file_id = query->arg("file_id").str();
+  check_remote_file_id(file_id, std::move(query), [this](object_ptr<td_api::file> file, PromisedQueryPtr query) {
+    do_cancel_file_download(std::move(file), std::move(query));
+  });
+  return td::Status::OK();
+}
+
 void Client::do_get_file(object_ptr<td_api::file> file, PromisedQueryPtr query) {
   if (!parameters_->local_mode_ &&
       td::max(file->expected_size_, file->local_->downloaded_size_) > MAX_DOWNLOAD_FILE_SIZE) {  // speculative check
@@ -15821,6 +15854,16 @@ void Client::do_get_file(object_ptr<td_api::file> file, PromisedQueryPtr query) 
   file_download_listeners_[file_id].push_back(std::move(query));
   send_request(make_object<td_api::downloadFile>(file_id, 1, 0, 0, false),
                td::make_unique<TdOnDownloadFileCallback>(this, file_id));
+}
+
+void Client::do_cancel_file_download(object_ptr<td_api::file> file, PromisedQueryPtr query) {
+  auto file_id = file->id_;
+  if (file->local_->is_downloading_completed_ || !is_file_being_downloaded(file_id)) {
+    return answer_query(td::JsonBool(false), std::move(query));
+  }
+
+  send_request(make_object<td_api::cancelDownloadFile>(file_id, false),
+               td::make_unique<TdOnCancelFileDownloadCallback>(this, file_id, std::move(query)));
 }
 
 bool Client::is_file_being_downloaded(int32 file_id) const {
