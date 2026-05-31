@@ -982,6 +982,9 @@ class Client final : public WebhookActor::Callback {
   void do_get_file(object_ptr<td_api::file> file, PromisedQueryPtr query);
   void do_cancel_file_download(object_ptr<td_api::file> file, PromisedQueryPtr query);
 
+  void start_file_download(int32 file_id);
+  void start_next_file_download();
+  bool is_file_download_active(int32 file_id) const;
   bool is_file_being_downloaded(int32 file_id) const;
   void on_file_download(int32 file_id, td::Result<object_ptr<td_api::file>> r_file);
 
@@ -1499,6 +1502,8 @@ class Client final : public WebhookActor::Callback {
 
   td::FlatHashMap<int32, td::vector<PromisedQueryPtr>> file_download_listeners_;
   td::FlatHashSet<int32> download_started_file_ids_;
+  std::queue<int32> pending_file_download_ids_;
+  int32 active_file_download_id_ = 0;
 
   struct YetUnsentMessage {
     int64 send_message_query_id = 0;
