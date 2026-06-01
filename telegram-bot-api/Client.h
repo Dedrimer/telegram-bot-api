@@ -87,6 +87,7 @@ class Client final : public WebhookActor::Callback {
 
   class JsonEmptyObject;
   class JsonFile;
+  class JsonFileDownloadProgress;
   class JsonDatedFile;
   class JsonDatedFiles;
   class JsonUser;
@@ -950,6 +951,7 @@ class Client final : public WebhookActor::Callback {
   td::Status process_set_webhook_query(PromisedQueryPtr &query);
   td::Status process_get_webhook_info_query(PromisedQueryPtr &query);
   td::Status process_get_file_query(PromisedQueryPtr &query);
+  td::Status process_get_file_download_progress_query(PromisedQueryPtr &query);
   td::Status process_cancel_file_download_query(PromisedQueryPtr &query);
 
   void webhook_verified(td::string cached_ip_address) final;
@@ -980,6 +982,7 @@ class Client final : public WebhookActor::Callback {
   void on_sent_story(object_ptr<td_api::story> &&story, PromisedQueryPtr query);
 
   void do_get_file(object_ptr<td_api::file> file, PromisedQueryPtr query);
+  void do_get_file_download_progress(object_ptr<td_api::file> file, PromisedQueryPtr query);
   void do_cancel_file_download(object_ptr<td_api::file> file, PromisedQueryPtr query);
 
   void start_file_download(int32 file_id);

@@ -393,6 +393,7 @@ bool Client::init_methods() {
   methods_.emplace("deletewebhook", &Client::process_set_webhook_query);
   methods_.emplace("getwebhookinfo", &Client::process_get_webhook_info_query);
   methods_.emplace("getfile", &Client::process_get_file_query);
+  methods_.emplace("getfiledownloadprogress", &Client::process_get_file_download_progress_query);
   methods_.emplace("cancelfiledownload", &Client::process_cancel_file_download_query);
   return true;
 }
@@ -423,6 +424,40 @@ class Client::JsonFile final : public td::Jsonable {
   const td_api::file *file_;
   const Client *client_;
   bool with_path_;
+};
+
+class Client::JsonFileDownloadProgress final : public td::Jsonable {
+ public:
+  JsonFileDownloadProgress(const td_api::file *file, bool is_download_requested,
+                           bool is_download_active)
+      : file_(file)
+      , is_download_requested_(is_download_requested)
+      , is_download_active_(is_download_active) {
+  }
+
+  void store(td::JsonValueScope *scope) const {
+    auto object = scope->enter_object();
+
+    object("file_id", file_->remote_->id_);
+    object("file_unique_id", file_->remote_->unique_id_);
+    object("td_file_id", file_->id_);
+    if (file_->size_) {
+      object("file_size", file_->size_);
+    }
+    if (file_->expected_size_) {
+      object("expected_size", file_->expected_size_);
+    }
+    object("downloaded_size", file_->local_->downloaded_size_);
+    object("is_downloading_active", td::JsonBool(file_->local_->is_downloading_active_));
+    object("is_downloading_completed", td::JsonBool(file_->local_->is_downloading_completed_));
+    object("is_download_requested", td::JsonBool(is_download_requested_));
+    object("is_download_active", td::JsonBool(is_download_active_));
+  }
+
+ private:
+  const td_api::file *file_;
+  bool is_download_requested_;
+  bool is_download_active_;
 };
 
 class Client::JsonDatedFile final : public td::Jsonable {
@@ -15840,6 +15875,14 @@ td::Status Client::process_get_file_query(PromisedQueryPtr &query) {
   return td::Status::OK();
 }
 
+td::Status Client::process_get_file_download_progress_query(PromisedQueryPtr &query) {
+  td::string file_id = query->arg("file_id").str();
+  check_remote_file_id(file_id, std::move(query), [this](object_ptr<td_api::file> file, PromisedQueryPtr query) {
+    do_get_file_download_progress(std::move(file), std::move(query));
+  });
+  return td::Status::OK();
+}
+
 td::Status Client::process_cancel_file_download_query(PromisedQueryPtr &query) {
   td::string file_id = query->arg("file_id").str();
   check_remote_file_id(file_id, std::move(query), [this](object_ptr<td_api::file> file, PromisedQueryPtr query) {
@@ -15870,6 +15913,13 @@ void Client::do_get_file(object_ptr<td_api::file> file, PromisedQueryPtr query) 
   } else {
     pending_file_download_ids_.push(file_id);
   }
+}
+
+void Client::do_get_file_download_progress(object_ptr<td_api::file> file, PromisedQueryPtr query) {
+  auto file_id = file->id_;
+  answer_query(JsonFileDownloadProgress(file.get(), is_file_being_downloaded(file_id),
+                                        is_file_download_active(file_id)),
+               std::move(query));
 }
 
 void Client::start_file_download(int32 file_id) {
