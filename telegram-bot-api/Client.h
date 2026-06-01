@@ -86,6 +86,7 @@ class Client final : public WebhookActor::Callback {
   static constexpr std::size_t MAX_STICKER_EMOJI_COUNT = 20;
 
   class JsonEmptyObject;
+  class JsonBotApiVersion;
   class JsonFile;
   class JsonFileDownloadProgress;
   class JsonDatedFile;
@@ -778,6 +779,7 @@ class Client final : public WebhookActor::Callback {
   void on_cmd(PromisedQueryPtr query, bool force = false);
 
   td::Status process_get_me_query(PromisedQueryPtr &query);
+  td::Status process_get_bot_api_version_query(PromisedQueryPtr &query);
   td::Status process_get_my_commands_query(PromisedQueryPtr &query);
   td::Status process_set_my_commands_query(PromisedQueryPtr &query);
   td::Status process_delete_my_commands_query(PromisedQueryPtr &query);

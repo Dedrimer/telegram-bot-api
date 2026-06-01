@@ -215,6 +215,7 @@ bool Client::is_special_error_code(int32 error_code) {
 
 bool Client::init_methods() {
   methods_.emplace("getme", &Client::process_get_me_query);
+  methods_.emplace("getbotapiversion", &Client::process_get_bot_api_version_query);
   methods_.emplace("getmycommands", &Client::process_get_my_commands_query);
   methods_.emplace("setmycommands", &Client::process_set_my_commands_query);
   methods_.emplace("deletemycommands", &Client::process_delete_my_commands_query);
@@ -408,6 +409,21 @@ class Client::JsonEmptyObject final : public td::Jsonable {
   void store(td::JsonValueScope *scope) const {
     auto object = scope->enter_object();
   }
+};
+
+class Client::JsonBotApiVersion final : public td::Jsonable {
+ public:
+  explicit JsonBotApiVersion(td::Slice version) : version_(version) {
+  }
+
+  void store(td::JsonValueScope *scope) const {
+    auto object = scope->enter_object();
+    object("name", "telegram-bot-api");
+    object("version", version_);
+  }
+
+ private:
+  td::Slice version_;
 };
 
 class Client::JsonFile final : public td::Jsonable {
@@ -12772,6 +12788,11 @@ void Client::on_cmd(PromisedQueryPtr query, bool force) {
 
 td::Status Client::process_get_me_query(PromisedQueryPtr &query) {
   answer_query(JsonUser(my_id_, this, true), std::move(query));
+  return td::Status::OK();
+}
+
+td::Status Client::process_get_bot_api_version_query(PromisedQueryPtr &query) {
+  answer_query(JsonBotApiVersion(parameters_->version_), std::move(query));
   return td::Status::OK();
 }
 
