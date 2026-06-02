@@ -10,6 +10,7 @@
 #include "telegram-bot-api/HttpServer.h"
 #include "telegram-bot-api/HttpStatConnection.h"
 #include "telegram-bot-api/Stats.h"
+#include "telegram-bot-api/Version.h"
 #include "telegram-bot-api/Watchdog.h"
 
 #include "td/db/binlog/Binlog.h"
@@ -165,7 +166,7 @@ int main(int argc, char *argv[]) {
   auto start_time = td::Time::now();
   auto shared_data = std::make_shared<SharedData>();
   auto parameters = std::make_unique<ClientParameters>();
-  parameters->version_ = "10.1.0";
+  parameters->version_ = TELEGRAM_BOT_API_VERSION;
   parameters->shared_data_ = shared_data;
   parameters->start_time_ = start_time;
   auto net_query_stats = td::create_net_query_stats();

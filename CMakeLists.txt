@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.10 FATAL_ERROR)
 
-project(TelegramBotApi VERSION 10.1.0 LANGUAGES CXX)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" TELEGRAM_BOT_API_VERSION LIMIT_COUNT 1)
+string(STRIP "${TELEGRAM_BOT_API_VERSION}" TELEGRAM_BOT_API_VERSION)
+
+project(TelegramBotApi VERSION ${TELEGRAM_BOT_API_VERSION} LANGUAGES CXX)
 
 add_subdirectory(td EXCLUDE_FROM_ALL)
 
@@ -79,12 +82,22 @@ set(TELEGRAM_BOT_API_SOURCE
   telegram-bot-api/HttpStatConnection.h
   telegram-bot-api/Query.h
   telegram-bot-api/Stats.h
+  telegram-bot-api/Version.h.in
   telegram-bot-api/Watchdog.h
   telegram-bot-api/WebhookActor.h
 )
 
+configure_file(
+  telegram-bot-api/Version.h.in
+  generated/telegram-bot-api/Version.h
+  @ONLY
+)
+
 add_executable(telegram-bot-api ${TELEGRAM_BOT_API_SOURCE})
-target_include_directories(telegram-bot-api PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>)
+target_include_directories(telegram-bot-api PRIVATE
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated>
+)
 target_link_libraries(telegram-bot-api PRIVATE memprof tdactor tdcore tddb tdnet tdutils)
 
 install(TARGETS telegram-bot-api RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
