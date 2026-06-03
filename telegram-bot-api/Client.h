@@ -983,7 +983,7 @@ class Client final : public WebhookActor::Callback {
 
   void on_sent_story(object_ptr<td_api::story> &&story, PromisedQueryPtr query);
 
-  void do_get_file(object_ptr<td_api::file> file, PromisedQueryPtr query);
+  void do_get_file(object_ptr<td_api::file> file, PromisedQueryPtr query, td::string target_path);
   void do_get_file_download_progress(object_ptr<td_api::file> file, PromisedQueryPtr query);
   void do_cancel_file_download(object_ptr<td_api::file> file, PromisedQueryPtr query);
 
@@ -992,6 +992,7 @@ class Client final : public WebhookActor::Callback {
   bool is_file_download_active(int32 file_id) const;
   bool is_file_being_downloaded(int32 file_id) const;
   void on_file_download(int32 file_id, td::Result<object_ptr<td_api::file>> r_file);
+  td::Status save_downloaded_file(object_ptr<td_api::file> &file, td::Slice target_path);
 
   void return_stickers(object_ptr<td_api::stickers> stickers, PromisedQueryPtr query);
 
@@ -1505,7 +1506,11 @@ class Client final : public WebhookActor::Callback {
   td::WaitFreeHashMap<int64, td::unique_ptr<ChatInfo>> chats_;
   td::WaitFreeHashMap<td::string, td::unique_ptr<BusinessConnection>> business_connections_;
 
-  td::FlatHashMap<int32, td::vector<PromisedQueryPtr>> file_download_listeners_;
+  struct FileDownloadListener {
+    PromisedQueryPtr query;
+    td::string target_path;
+  };
+  td::FlatHashMap<int32, td::vector<FileDownloadListener>> file_download_listeners_;
   td::FlatHashSet<int32> download_started_file_ids_;
   std::queue<int32> pending_file_download_ids_;
   int32 active_file_download_id_ = 0;

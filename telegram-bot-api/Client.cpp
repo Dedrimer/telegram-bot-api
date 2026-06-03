@@ -468,6 +468,13 @@ class Client::JsonFileDownloadProgress final : public td::Jsonable {
     object("is_downloading_completed", td::JsonBool(file_->local_->is_downloading_completed_));
     object("is_download_requested", td::JsonBool(is_download_requested_));
     object("is_download_active", td::JsonBool(is_download_active_));
+    if (file_->local_->is_downloading_completed_ && !file_->local_->path_.empty()) {
+      if (td::check_utf8(file_->local_->path_)) {
+        object("file_path", file_->local_->path_);
+      } else {
+        object("file_path", td::JsonRawString(file_->local_->path_));
+      }
+    }
   }
 
  private:
@@ -9377,8 +9384,8 @@ void Client::on_closed() {
     LOG(ERROR) << "Doesn't receive updateFile for file " << file_id;
     auto queries = std::move(it->second);
     file_download_listeners_.erase(it);
-    for (auto &query : queries) {
-      fail_query_closing(std::move(query));
+    for (auto &listener : queries) {
+      fail_query_closing(std::move(listener.query));
     }
   }
   download_started_file_ids_.clear();
@@ -15890,8 +15897,28 @@ td::Status Client::process_get_webhook_info_query(PromisedQueryPtr &query) {
 
 td::Status Client::process_get_file_query(PromisedQueryPtr &query) {
   td::string file_id = query->arg("file_id").str();
-  check_remote_file_id(file_id, std::move(query), [this](object_ptr<td_api::file> file, PromisedQueryPtr query) {
-    do_get_file(std::move(file), std::move(query));
+  td::string download_to_dir = query->arg("download_to_dir").str();
+  td::string download_file_name = query->arg("download_file_name").str();
+  td::string target_path;
+  if (!download_to_dir.empty() || !download_file_name.empty()) {
+    if (download_to_dir.empty()) {
+      return fail_query(400, "Bad Request: download_to_dir must be specified", std::move(query));
+    }
+    if (download_file_name.empty()) {
+      return fail_query(400, "Bad Request: download_file_name must be specified", std::move(query));
+    }
+    if (download_file_name.find('/') != td::string::npos || download_file_name.find('\\') != td::string::npos) {
+      return fail_query(400, "Bad Request: download_file_name must not contain path separators", std::move(query));
+    }
+    target_path = download_to_dir;
+    if (target_path.back() != '/' && target_path.back() != '\\') {
+      target_path += TD_DIR_SLASH;
+    }
+    target_path += download_file_name;
+  }
+  check_remote_file_id(file_id, std::move(query), [this, target_path = std::move(target_path)](
+                                                     object_ptr<td_api::file> file, PromisedQueryPtr query) mutable {
+    do_get_file(std::move(file), std::move(query), std::move(target_path));
   });
   return td::Status::OK();
 }
@@ -15912,23 +15939,29 @@ td::Status Client::process_cancel_file_download_query(PromisedQueryPtr &query) {
   return td::Status::OK();
 }
 
-void Client::do_get_file(object_ptr<td_api::file> file, PromisedQueryPtr query) {
+void Client::do_get_file(object_ptr<td_api::file> file, PromisedQueryPtr query, td::string target_path) {
   if (!parameters_->local_mode_ &&
       td::max(file->expected_size_, file->local_->downloaded_size_) > MAX_DOWNLOAD_FILE_SIZE) {  // speculative check
     return fail_query(400, "Bad Request: file is too big", std::move(query));
   }
   if (file->local_->is_downloading_completed_) {
+    if (!target_path.empty()) {
+      auto status = save_downloaded_file(file, target_path);
+      if (status.is_error()) {
+        return fail_query_with_error(std::move(query), status.code() == 0 ? 500 : status.code(), status.public_message());
+      }
+    }
     return answer_query(JsonFile(file.get(), this, true), std::move(query));
   }
 
   auto file_id = file->id_;
   auto it = file_download_listeners_.find(file_id);
   if (it != file_download_listeners_.end()) {
-    it->second.push_back(std::move(query));
+    it->second.push_back({std::move(query), std::move(target_path)});
     return;
   }
 
-  file_download_listeners_[file_id].push_back(std::move(query));
+  file_download_listeners_[file_id].push_back({std::move(query), std::move(target_path)});
   if (active_file_download_id_ == 0) {
     start_file_download(file_id);
   } else {
@@ -16001,15 +16034,67 @@ void Client::on_file_download(int32 file_id, td::Result<object_ptr<td_api::file>
   if (is_file_download_active(file_id)) {
     active_file_download_id_ = 0;
   }
-  for (auto &query : queries) {
-    if (r_file.is_error()) {
+  if (r_file.is_error()) {
+    for (auto &listener : queries) {
       const auto &error = r_file.error();
-      fail_query_with_error(std::move(query), error.code(), error.public_message());
-    } else {
-      answer_query(JsonFile(r_file.ok().get(), this, true), std::move(query));
+      fail_query_with_error(std::move(listener.query), error.code(), error.public_message());
+    }
+  } else {
+    auto file = r_file.move_as_ok();
+    for (auto &listener : queries) {
+      if (!listener.target_path.empty()) {
+        auto status = save_downloaded_file(file, listener.target_path);
+        if (status.is_error()) {
+          fail_query_with_error(std::move(listener.query), status.code() == 0 ? 500 : status.code(),
+                                status.public_message());
+          continue;
+        }
+      }
+      answer_query(JsonFile(file.get(), this, true), std::move(listener.query));
     }
   }
   start_next_file_download();
+}
+
+td::Status Client::save_downloaded_file(object_ptr<td_api::file> &file, td::Slice target_path) {
+  if (target_path.empty()) {
+    return td::Status::OK();
+  }
+  if (!file->local_->is_downloading_completed_) {
+    return td::Status::Error(400, "Bad Request: file download is not completed");
+  }
+  if (file->local_->path_.empty()) {
+    return td::Status::Error(500, "Internal Server Error: downloaded file path is empty");
+  }
+  if (td::Slice(file->local_->path_) == target_path) {
+    return td::Status::OK();
+  }
+
+  auto target_path_str = target_path.str();
+  auto separator_pos = target_path_str.rfind(TD_DIR_SLASH);
+#if TD_WINDOWS
+  auto windows_separator_pos = target_path_str.rfind('\\');
+  if (windows_separator_pos != td::string::npos &&
+      (separator_pos == td::string::npos || windows_separator_pos > separator_pos)) {
+    separator_pos = windows_separator_pos;
+  }
+#endif
+  if (separator_pos != td::string::npos) {
+    auto dir = target_path_str.substr(0, separator_pos);
+    if (!dir.empty()) {
+      TRY_STATUS_PREFIX(td::mkpath(dir, 0750), "Can't create download directory: ");
+    }
+  }
+
+  auto rename_status = td::rename(file->local_->path_, target_path_str);
+  if (rename_status.is_error()) {
+    TRY_STATUS_PREFIX(td::copy_file(file->local_->path_, target_path_str, file->local_->downloaded_size_),
+                      "Can't copy downloaded file: ");
+    TRY_STATUS_PREFIX(td::unlink(file->local_->path_), "Can't remove original downloaded file: ");
+  }
+
+  file->local_->path_ = std::move(target_path_str);
+  return td::Status::OK();
 }
 
 void Client::return_stickers(object_ptr<td_api::stickers> stickers, PromisedQueryPtr query) {
