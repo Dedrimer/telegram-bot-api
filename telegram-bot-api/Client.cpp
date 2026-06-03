@@ -15902,13 +15902,16 @@ td::Status Client::process_get_file_query(PromisedQueryPtr &query) {
   td::string target_path;
   if (!download_to_dir.empty() || !download_file_name.empty()) {
     if (download_to_dir.empty()) {
-      return fail_query(400, "Bad Request: download_to_dir must be specified", std::move(query));
+      fail_query(400, "Bad Request: download_to_dir must be specified", std::move(query));
+      return td::Status::OK();
     }
     if (download_file_name.empty()) {
-      return fail_query(400, "Bad Request: download_file_name must be specified", std::move(query));
+      fail_query(400, "Bad Request: download_file_name must be specified", std::move(query));
+      return td::Status::OK();
     }
     if (download_file_name.find('/') != td::string::npos || download_file_name.find('\\') != td::string::npos) {
-      return fail_query(400, "Bad Request: download_file_name must not contain path separators", std::move(query));
+      fail_query(400, "Bad Request: download_file_name must not contain path separators", std::move(query));
+      return td::Status::OK();
     }
     target_path = download_to_dir;
     if (target_path.back() != '/' && target_path.back() != '\\') {
