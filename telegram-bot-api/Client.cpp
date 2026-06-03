@@ -16091,9 +16091,10 @@ td::Status Client::save_downloaded_file(object_ptr<td_api::file> &file, td::Slic
 
   auto rename_status = td::rename(file->local_->path_, target_path_str);
   if (rename_status.is_error()) {
-    TRY_STATUS_PREFIX(td::copy_file(file->local_->path_, target_path_str, file->local_->downloaded_size_),
-                      "Can't copy downloaded file: ");
-    TRY_STATUS_PREFIX(td::unlink(file->local_->path_), "Can't remove original downloaded file: ");
+    return td::Status::Error(rename_status.code(),
+                             PSLICE() << "Can't save downloaded file without copying. Ensure download_to_dir is on the "
+                                         "same filesystem as the Bot API work directory: "
+                                      << rename_status.message());
   }
 
   file->local_->path_ = std::move(target_path_str);
