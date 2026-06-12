@@ -33,6 +33,8 @@
 #include "td/utils/utf8.h"
 
 #include <cstdlib>
+#include <fstream>
+#include <vector>
 
 namespace telegram_bot_api {
 
@@ -9389,8 +9391,8 @@ void Client::on_closed() {
     }
   }
   download_started_file_ids_.clear();
-  while (!pending_file_download_ids_.empty()) {
-    pending_file_download_ids_.pop();
+  while (!pending_file_downloads_.empty()) {
+    pending_file_downloads_.pop();
   }
   active_file_download_id_ = 0;
 
@@ -15899,6 +15901,8 @@ td::Status Client::process_get_file_query(PromisedQueryPtr &query) {
   td::string file_id = query->arg("file_id").str();
   td::string download_to_dir = query->arg("download_to_dir").str();
   td::string download_file_name = query->arg("download_file_name").str();
+  auto download_offset = td::max(td::to_integer<int64>(query->arg("download_offset")), static_cast<int64>(0));
+  auto download_limit = td::max(td::to_integer<int64>(query->arg("download_limit")), static_cast<int64>(0));
   td::string target_path;
   if (!download_to_dir.empty() || !download_file_name.empty()) {
     if (download_to_dir.empty()) {
@@ -15919,10 +15923,12 @@ td::Status Client::process_get_file_query(PromisedQueryPtr &query) {
     }
     target_path += download_file_name;
   }
-  check_remote_file_id(file_id, std::move(query), [this, target_path = std::move(target_path)](
+  check_remote_file_id(file_id, std::move(query),
+                       [this, target_path = std::move(target_path), download_offset, download_limit](
                                                      object_ptr<td_api::file> file, PromisedQueryPtr query) mutable {
-    do_get_file(std::move(file), std::move(query), std::move(target_path));
-  });
+                         do_get_file(std::move(file), std::move(query), std::move(target_path), download_offset,
+                                     download_limit);
+                       });
   return td::Status::OK();
 }
 
@@ -15942,14 +15948,15 @@ td::Status Client::process_cancel_file_download_query(PromisedQueryPtr &query) {
   return td::Status::OK();
 }
 
-void Client::do_get_file(object_ptr<td_api::file> file, PromisedQueryPtr query, td::string target_path) {
+void Client::do_get_file(object_ptr<td_api::file> file, PromisedQueryPtr query, td::string target_path,
+                         int64 download_offset, int64 download_limit) {
   if (!parameters_->local_mode_ &&
       td::max(file->expected_size_, file->local_->downloaded_size_) > MAX_DOWNLOAD_FILE_SIZE) {  // speculative check
     return fail_query(400, "Bad Request: file is too big", std::move(query));
   }
   if (file->local_->is_downloading_completed_) {
     if (!target_path.empty()) {
-      auto status = save_downloaded_file(file, target_path);
+      auto status = save_downloaded_file(file, target_path, download_offset);
       if (status.is_error()) {
         return fail_query_with_error(std::move(query), status.code() == 0 ? 500 : status.code(), status.public_message());
       }
@@ -15960,15 +15967,20 @@ void Client::do_get_file(object_ptr<td_api::file> file, PromisedQueryPtr query, 
   auto file_id = file->id_;
   auto it = file_download_listeners_.find(file_id);
   if (it != file_download_listeners_.end()) {
-    it->second.push_back({std::move(query), std::move(target_path)});
+    const auto &active_listener = it->second[0];
+    if (active_listener.download_offset != download_offset || active_listener.download_limit != download_limit) {
+      return fail_query(409, "Conflict: file is already being downloaded with different resume parameters",
+                        std::move(query));
+    }
+    it->second.push_back({std::move(query), std::move(target_path), download_offset, download_limit});
     return;
   }
 
-  file_download_listeners_[file_id].push_back({std::move(query), std::move(target_path)});
+  file_download_listeners_[file_id].push_back({std::move(query), std::move(target_path), download_offset, download_limit});
   if (active_file_download_id_ == 0) {
-    start_file_download(file_id);
+    start_file_download(file_id, download_offset, download_limit);
   } else {
-    pending_file_download_ids_.push(file_id);
+    pending_file_downloads_.push({file_id, download_offset, download_limit});
   }
 }
 
@@ -15979,14 +15991,14 @@ void Client::do_get_file_download_progress(object_ptr<td_api::file> file, Promis
                std::move(query));
 }
 
-void Client::start_file_download(int32 file_id) {
+void Client::start_file_download(int32 file_id, int64 download_offset, int64 download_limit) {
   CHECK(active_file_download_id_ == 0);
   if (!is_file_being_downloaded(file_id)) {
     return;
   }
 
   active_file_download_id_ = file_id;
-  send_request(make_object<td_api::downloadFile>(file_id, 1, 0, 0, false),
+  send_request(make_object<td_api::downloadFile>(file_id, 1, download_offset, download_limit, false),
                td::make_unique<TdOnDownloadFileCallback>(this, file_id));
 }
 
@@ -15994,11 +16006,11 @@ void Client::start_next_file_download() {
   if (active_file_download_id_ != 0) {
     return;
   }
-  while (!pending_file_download_ids_.empty()) {
-    auto file_id = pending_file_download_ids_.front();
-    pending_file_download_ids_.pop();
-    if (is_file_being_downloaded(file_id)) {
-      start_file_download(file_id);
+  while (!pending_file_downloads_.empty()) {
+    auto request = pending_file_downloads_.front();
+    pending_file_downloads_.pop();
+    if (is_file_being_downloaded(request.file_id)) {
+      start_file_download(request.file_id, request.download_offset, request.download_limit);
       return;
     }
   }
@@ -16046,7 +16058,7 @@ void Client::on_file_download(int32 file_id, td::Result<object_ptr<td_api::file>
     auto file = r_file.move_as_ok();
     for (auto &listener : queries) {
       if (!listener.target_path.empty()) {
-        auto status = save_downloaded_file(file, listener.target_path);
+        auto status = save_downloaded_file(file, listener.target_path, listener.download_offset);
         if (status.is_error()) {
           fail_query_with_error(std::move(listener.query), status.code() == 0 ? 500 : status.code(),
                                 status.public_message());
@@ -16059,7 +16071,7 @@ void Client::on_file_download(int32 file_id, td::Result<object_ptr<td_api::file>
   start_next_file_download();
 }
 
-td::Status Client::save_downloaded_file(object_ptr<td_api::file> &file, td::Slice target_path) {
+td::Status Client::save_downloaded_file(object_ptr<td_api::file> &file, td::Slice target_path, int64 append_from_offset) {
   if (target_path.empty()) {
     return td::Status::OK();
   }
@@ -16087,6 +16099,53 @@ td::Status Client::save_downloaded_file(object_ptr<td_api::file> &file, td::Slic
     if (!dir.empty()) {
       TRY_STATUS_PREFIX(td::mkpath(dir, 0750), "Can't create download directory: ");
     }
+  }
+
+  if (append_from_offset > 0) {
+    std::ifstream target_in(target_path_str, std::ios::binary | std::ios::ate);
+    if (!target_in.is_open()) {
+      return td::Status::Error(500, PSLICE() << "Can't open partial download target: " << target_path_str);
+    }
+    auto target_size = static_cast<int64>(target_in.tellg());
+    target_in.close();
+    if (target_size != append_from_offset) {
+      return td::Status::Error(400, PSLICE() << "Bad Request: partial download target size " << target_size
+                                             << " doesn't match download_offset " << append_from_offset);
+    }
+
+    std::ifstream source(file->local_->path_, std::ios::binary | std::ios::ate);
+    if (!source.is_open()) {
+      return td::Status::Error(500, PSLICE() << "Can't open downloaded file: " << file->local_->path_);
+    }
+    auto source_size = static_cast<int64>(source.tellg());
+    auto copy_offset = source_size >= append_from_offset ? append_from_offset : static_cast<int64>(0);
+    source.seekg(copy_offset, std::ios::beg);
+
+    std::ofstream target(target_path_str, std::ios::binary | std::ios::app);
+    if (!target.is_open()) {
+      return td::Status::Error(500, PSLICE() << "Can't append to partial download target: " << target_path_str);
+    }
+
+    std::vector<char> buffer(1 << 20);
+    while (source.good()) {
+      source.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+      auto bytes_read = source.gcount();
+      if (bytes_read > 0) {
+        target.write(buffer.data(), bytes_read);
+        if (!target.good()) {
+          return td::Status::Error(500, PSLICE() << "Can't append downloaded bytes to: " << target_path_str);
+        }
+      }
+    }
+    if (!source.eof()) {
+      return td::Status::Error(500, PSLICE() << "Can't read downloaded file: " << file->local_->path_);
+    }
+
+    source.close();
+    target.close();
+    td::unlink(file->local_->path_).ignore();
+    file->local_->path_ = std::move(target_path_str);
+    return td::Status::OK();
   }
 
   auto rename_status = td::rename(file->local_->path_, target_path_str);
